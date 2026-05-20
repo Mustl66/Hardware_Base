@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="search-bar">
+  <form method="get" action="/">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search part number, manufacturer, tags, summary…" autofocus>
+    <select name="category">
+      <option value="">All categories</option>
+      {% for cat in categories %}
+        <option value="{{ cat }}" {% if cat == category %}selected{% endif %}>{{ cat }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Search</button>
+    <button type="button" class="secondary" onclick="startNewSession(null)">💬 Ask AI</button>
+  </form>
+</section>
+
+<section class="results">
+  {% if hits %}
+    <table class="components">
+      <thead>
+        <tr><th>Part #</th><th>Manufacturer</th><th>Category</th><th>Package</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+      {% for h in hits %}
+        <tr onclick="location.href='/components/{{ h.component.id }}'">
+          <td class="pn">{{ h.component.part_number }}</td>
+          <td>{{ h.component.manufacturer }}</td>
+          <td><span class="tag">{{ h.component.category }}</span></td>
+          <td>{{ h.component.package }}</td>
+          <td class="desc">{{ h.component.description }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty">
+      <p>No components yet.</p>
+      <a class="btn" href="/upload">Upload your first datasheet →</a>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

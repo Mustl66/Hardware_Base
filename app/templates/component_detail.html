@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+{% block title %}{{ c.part_number }} — Hardware Base{% endblock %}
+{% block content %}
+
+<!-- Inject component context for the sidebar chat -->
+<script>
+window.CURRENT_COMP_ID   = {{ c.id }};
+window.CURRENT_COMP_PART = {{ c.part_number | tojson }};
+window.CURRENT_COMP_DS   = {{ (c.datasheet_filename or '') | tojson }};
+</script>
+
+<article class="component">
+  <header class="comp-head">
+    <div>
+      <h1>{{ c.part_number }}</h1>
+      <div class="sub">{{ c.manufacturer }} · <span class="tag">{{ c.category }}</span>
+        {% if c.package %}· {{ c.package }}{% endif %}
+      </div>
+      <p class="desc">{{ c.description }}</p>
+    </div>
+    <div class="actions">
+      {% if c.datasheet_filename %}
+      <button class="secondary" onclick="openPdfModal('{{ c.datasheet_filename }}', '{{ c.part_number }} Datasheet')">
+        📄 Open Datasheet
+      </button>
+      {% endif %}
+      <button class="secondary" onclick="startNewSession({{ c.id }})">
+        💬 New Chat
+      </button>
+      <button onclick="deleteComp({{ c.id }})" class="danger">Delete</button>
+    </div>
+  </header>
+
+  <!-- ── Info columns ─────────────────────────────────────────────── -->
+  <div class="two-col">
+    <div class="col">
+      <h3>Summary</h3>
+      <p>{{ c.summary }}</p>
+
+      <h3>Features</h3>
+      <pre class="bullets">{{ c.features }}</pre>
+
+      <h3>Warnings &amp; Design Notes</h3>
+      <pre class="bullets warn">{{ c.warnings }}</pre>
+
+      <h3>Typical Applications</h3>
+      <pre class="bullets">{{ c.applications }}</pre>
+
+      {% if c.tags %}
+      <h3>Tags</h3>
+      <div class="tags">
+        {% for t in c.tags.split(',') %}
+          {% if t.strip() %}<span class="tag">{{ t.strip() }}</span>{% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if c.specs %}
+      <h3>Specs</h3>
+      <table class="specs">
+        {% for k, v in c.specs.items() %}
+        <tr><th>{{ k }}</th><td>{{ v }}</td></tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+    </div>
+
+    <!-- ── Component Chat (inline on page, scoped to this component) ── -->
+    <div class="col">
+      <h3>Ask AI about this component</h3>
+      <div id="chat-messages" class="comp-chat-messages"></div>
+      <form id="comp-chat-form" class="comp-chat-form">
+        <textarea id="comp-chat-input" rows="2"
+          placeholder="e.g. 'pinout for a peak detector' or 'max supply voltage?'"
+          required></textarea>
+        <div class="comp-chat-actions">
+          <button type="submit" id="comp-send-btn">Send</button>
+          <button type="button" id="save-last-btn" class="secondary" disabled title="Save last AI answer as a note">
+            💾 Save answer
+          </button>
+        </div>
+      </form>
+
+      <!-- ── Saved Notes ─────────────────────────────────────────── -->
+      <div class="notes-section-inline">
+        <h3>Saved Notes <span class="notes-count" id="notes-count"></span></h3>
+        <div id="notes-list" class="notes-list"></div>
+      </div>
+    </div>
+  </div>
+</article>
+
+<script>
+const COMP_ID = {{ c.id }};
+const chatHistory = [];
+let lastQuestion = "";
+let lastAnswer = "";
+
+// ── Inline Component Chat ──────────────────────────────────────────────────
+
+const msgsEl    = document.getElementById("chat-messages");
+const chatForm  = document.getElementById("comp-chat-form");
+const chatInput = document.getElementById("comp-chat-input");
+const sendBtn   = document.getElementById("comp-send-btn");
+const saveBtn   = document.getElementById("save-last-btn");
+
+function addChatMsg(role, content) {
+  const wrap = document.createElement("div");
+  wrap.className = "cmsg " + role;
+  const label = document.createElement("div");
+  label.className = "cmsg-role";
+  label.textContent = role === "user" ? "You" : "AI";
+  const body = document.createElement("div");
+  body.className = "cmsg-body";
+  body.textContent = content;
+  wrap.appendChild(label);
+  wrap.appendChild(body);
+  msgsEl.appendChild(wrap);
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+  return body;
+}
+
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    chatForm.dispatchEvent(new Event("submit"));
+  }
+});
+
+chatForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = chatInput.value.trim();
+  if (!msg) return;
+
+  chatInput.value = "";
+  sendBtn.disabled = true;
+  saveBtn.disabled = true;
+  lastQuestion = msg;
+  lastAnswer = "";
+
+  addChatMsg("user", msg);
+  chatHistory.push({ role: "user", content: msg });
+
+  const target = addChatMsg("assistant", "");
+  try {
+    const r = await fetch(`/api/components/${COMP_ID}/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: msg, history: chatHistory.slice(0, -1) }),
+    });
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let acc = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      acc += dec.decode(value, { stream: true });
+      target.textContent = acc;
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+    lastAnswer = acc;
+    chatHistory.push({ role: "assistant", content: acc });
+    saveBtn.disabled = false;
+  } catch (err) {
+    target.textContent = "[error: " + err + "]";
+  } finally {
+    sendBtn.disabled = false;
+  }
+});
+
+saveBtn.addEventListener("click", async () => {
+  if (!lastAnswer) return;
+  const note = await createNote(lastQuestion, lastAnswer);
+  renderNote(note);
+  updateNotesCount();
+  saveBtn.disabled = true;
+});
+
+// ── Notes ──────────────────────────────────────────────────────────────────
+
+const notesList  = document.getElementById("notes-list");
+const notesCount = document.getElementById("notes-count");
+
+async function loadNotes() {
+  const r = await fetch(`/api/components/${COMP_ID}/notes`);
+  const notes = await r.json();
+  notesList.innerHTML = "";
+  notes.forEach(renderNote);
+  updateNotesCount();
+}
+
+function updateNotesCount() {
+  const count = notesList.querySelectorAll(".note-card").length;
+  notesCount.textContent = count > 0 ? `(${count})` : "";
+}
+
+function renderNote(note) {
+  const card = document.createElement("div");
+  card.className = "note-card";
+  card.dataset.id = note.id;
+  card.innerHTML = `
+    <div class="note-q">${escHtml(note.question)}</div>
+    <div class="note-body" contenteditable="false">${escHtml(note.content)}</div>
+    <div class="note-footer">
+      <span class="note-date">${fmtDate(note.updated_at || note.created_at)}</span>
+      <div class="note-btns">
+        <button class="secondary note-edit-btn" onclick="editNote(this)">✏️ Edit</button>
+        <button class="secondary note-save-btn" onclick="saveNote(this)" style="display:none">💾 Save</button>
+        <button class="secondary note-cancel-btn" onclick="cancelEdit(this)" style="display:none">Cancel</button>
+        <button class="danger note-del-btn" onclick="deleteNote(this)">🗑</button>
+      </div>
+    </div>
+  `;
+  notesList.prepend(card);
+  updateNotesCount();
+}
+
+function editNote(btn) {
+  const card = btn.closest(".note-card");
+  const body = card.querySelector(".note-body");
+  body._orig = body.textContent;
+  body.contentEditable = "true";
+  body.focus();
+  card.querySelector(".note-edit-btn").style.display = "none";
+  card.querySelector(".note-save-btn").style.display = "";
+  card.querySelector(".note-cancel-btn").style.display = "";
+}
+
+function cancelEdit(btn) {
+  const card = btn.closest(".note-card");
+  const body = card.querySelector(".note-body");
+  body.textContent = body._orig;
+  body.contentEditable = "false";
+  card.querySelector(".note-edit-btn").style.display = "";
+  card.querySelector(".note-save-btn").style.display = "none";
+  card.querySelector(".note-cancel-btn").style.display = "none";
+}
+
+async function saveNote(btn) {
+  const card = btn.closest(".note-card");
+  const nid = card.dataset.id;
+  const body = card.querySelector(".note-body");
+  const newContent = body.textContent.trim();
+  try {
+    const r = await fetch(`/api/components/${COMP_ID}/notes/${nid}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: newContent }),
+    });
+    const updated = await r.json();
+    body.contentEditable = "false";
+    card.querySelector(".note-date").textContent = fmtDate(updated.updated_at);
+    card.querySelector(".note-edit-btn").style.display = "";
+    card.querySelector(".note-save-btn").style.display = "none";
+    card.querySelector(".note-cancel-btn").style.display = "none";
+  } catch(err) {
+    alert("Save failed: " + err);
+  }
+}
+
+async function deleteNote(btn) {
+  if (!confirm("Delete this note?")) return;
+  const card = btn.closest(".note-card");
+  const nid = card.dataset.id;
+  const r = await fetch(`/api/components/${COMP_ID}/notes/${nid}`, { method: "DELETE" });
+  if (r.ok) {
+    card.remove();
+    updateNotesCount();
+  }
+}
+
+async function createNote(question, content) {
+  const r = await fetch(`/api/components/${COMP_ID}/notes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, content }),
+  });
+  return await r.json();
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function fmtDate(iso) {
+  if (!iso) return "";
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+}
+
+async function deleteComp(id) {
+  if (!confirm("Delete this component?")) return;
+  const r = await fetch(`/api/components/${id}`, { method: "DELETE" });
+  if (r.ok) location.href = "/";
+}
+
+loadNotes();
+</script>
+{% endblock %}

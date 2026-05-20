@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="upload">
+  <h1>Add a Datasheet</h1>
+  <p class="hint">Drop a PDF. The assistant will read it, extract part info, classify it,
+     summarize features and warnings, and embed it for semantic search.</p>
+
+  <form action="/api/components/upload" method="post" enctype="multipart/form-data" class="upload-form">
+    <label>
+      <span>Datasheet PDF</span>
+      <input type="file" name="file" accept="application/pdf" required>
+    </label>
+    <label>
+      <span>Part number hint (optional — overrides auto-detected)</span>
+      <input type="text" name="part_number_hint" placeholder="e.g. OPA197">
+    </label>
+    <button type="submit">Upload & Analyze</button>
+    <p class="hint">First upload may take 30-90s — local LLM + embeddings spin up.</p>
+  </form>
+</section>
+{% endblock %}
